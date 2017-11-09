@@ -7,12 +7,15 @@ import time
 import _thread
 import random
 class branch:
+
     def __init__(self,ip,port,name):
         self.ip = ip
         self.port = port
         self.name = name
         self.balance = 0
         self.mutex = threading.Lock()
+        self.snapshots = {}
+        self.sendMarker = False
         print("Branch initialized")
 
     def initBranch(self,init):
@@ -36,6 +39,94 @@ class branch:
             print("balance added to{0}".format(self.name))
             self.mutex.release()
 
+    def InitSnapshot(self,snapshotId):
+        global snapId
+        snapId = snapshotId
+        #record local state
+        self.recordLocalState(snapId)
+        #record in coming channel
+        #Send Markers
+        self.mutex.acquire()
+        self.sendMarker = True
+        self.mutex.release()
+
+    def recordLocalState(self,snapId):
+        self.mutex.acquire()
+        self.snapshots[snapId] = {"localState":self.balance}
+        print("Snapshot :{0}".format(self.snapshots))
+        self.mutex.release()
+
+    def sendMarkerMsg(self,snapId):
+        b = bank_pb2.BranchMessage()
+        b.marker.snapshot_id = snapId
+        return b
+
+    def marker(self,markerMsg):
+        print("Received Marker !")
+
+        self.mutex.acquire()
+        #record local state
+        self.snapshots[markerMsg.snapshot_id] = {"localState":self.balance}
+        self.mutex.release()
+        print(self.snapshots)
+        #return 0
+
+    def Server(self,sock):
+        while True:
+            sock.listen(10)
+            print("Server Thread Started.....!")
+            con, ip = sock.accept()
+            msg = bank_pb2.BranchMessage()
+            msg.ParseFromString(con.recv(8000))
+
+            if (msg.HasField("transfer")):
+                self.transfer(msg.transfer.money)
+            elif (msg.HasField("init_snapshot")):
+                print("Init Snap: {0}".format(msg.init_snapshot))
+                self.InitSnapshot(msg.init_snapshot.snapshot_id)
+            elif(msg.HasField("marker")):
+                self.marker(msg.marker)
+
+    #
+    def initTransfer(self,sock):
+        global snapId
+        while True:
+            #global br_list
+            if(self.sendMarker):
+                b = self.sendMarkerMsg(snapId)
+                for branch in self.branches_list:
+                    sock.connect((self.branches_list[branch]["ip"],self.branches_list[branch]["port"]))
+                    sock.send(b.SerializeToString())
+                    sock.close()
+                    sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+                self.mutex.acquire()
+                self.sendMarker = False
+                self.mutex.release()
+
+            print("inint Transfer")
+            # for key in br_list:
+            if (len(self.branches_list) == 0):
+                break
+            key = random.choice(list(self.branches_list.keys()))
+            sock.connect((self.branches_list[key]["ip"], self.branches_list[key]["port"]))
+            msg = bank_pb2.BranchMessage()
+            print("Transferring to - {0} on port: {1}".format(key, self.branches_list[key]["port"]))
+
+            msg.transfer.money = 10
+            self.mutex.acquire()
+            print("Before Balance: {0} ".format(self.balance))
+            self.balance -= msg.transfer.money
+            print("Current Balance: {0} ".format(self.balance))
+            self.mutex.release()
+            req = msg.SerializeToString()
+            sock.send(req)
+            # print("sent!")
+            sock.close()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            time.sleep(5)
+
+
+
 if len(sys.argv) != 3:
     print("Usage:", sys.argv[0],"[BRANCH_NAME] [PORT]")
     sys.exit(-1)
@@ -54,44 +145,9 @@ branch.initBranch(br_msg.init_branch)
 br_list = branch.branches_list
 
 client_socket = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+snapId = 0
 
 
-def Server(sock):
-    while True:
-        sock.listen(10)
-        print("Server Thread Started.....!")
-        con,ip = sock.accept()
-        msg = bank_pb2.BranchMessage()
-        msg.ParseFromString(con.recv(8000))
-
-        if (msg.HasField("transfer")):
-            branch.transfer(msg.transfer.money)
-        elif (msg.HasField("init_snapshot")):
-            print("Init Snap: {0}".format(msg.init_snapshot))
-
-#
-def initTrasnfer(sock):
-    while True:
-            print("inint Transfer")
-        #for key in br_list:
-            if(len(br_list)==0):
-                break
-            key = random.choice(list(br_list.keys()))
-            sock.connect((br_list[key]["ip"],br_list[key]["port"]))
-            msg = bank_pb2.BranchMessage()
-            print("Transferring to - {0} on port: {1}".format(key, br_list[key]["port"]))
-
-            msg.transfer.money = 10
-            print("Before Balance: {0} ".format(branch.balance))
-            branch.balance -= msg.transfer.money
-            print("Current Balance: {0} ".format(branch.balance))
-
-            req=msg.SerializeToString()
-            sock.send(req)
-            #print("sent!")
-            sock.close()
-            sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-            time.sleep(5)
 
 #
 # threading.Thread(target=Server, args=(listen_socket,)).start()
@@ -104,7 +160,7 @@ class ServerThread (threading.Thread):
       self.sock =sock
 
    def run(self):
-      Server(self.sock)
+       branch.Server(self.sock)
 
 class clientThread (threading.Thread):
    def __init__(self, sock):
@@ -113,7 +169,7 @@ class clientThread (threading.Thread):
 
    def run(self):
       print("Starting Client")
-      initTrasnfer(self.sock)
+      branch.initTransfer(self.sock)
 
 t1 = ServerThread(listen_socket)
 t2 = clientThread(client_socket)
