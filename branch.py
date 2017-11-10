@@ -15,12 +15,18 @@ class branch:
         self.balance = 0
         self.mutex = threading.Lock()
         self.snapshots = {}
-        self.sendMarker = False
+        self.sendMarker = {}
+        self.incomingRecord = {}
         print("Branch initialized")
 
     def initBranch(self,init):
         self.branches_list = {}
+        self.mutex.acquire()
+        self.intialBalance = init.balance
+        self.lower = int(0.01 * self.intialBalance)
+        self.upper = int(0.05 * self.intialBalance)
         self.balance = init.balance
+        self.mutex.release()
         self.number_of_branches = len(init.all_branches)
         for branch in init.all_branches:
             if(branch.name == self.name):
@@ -37,6 +43,9 @@ class branch:
             self.mutex.acquire()
             self.balance += amount
             print("balance added to{0}".format(self.name))
+            for x in self.incomingRecord:
+                if (self.incomingRecord[x]):
+                    self.snapshots[x]["incoming"].append(amount)
             self.mutex.release()
 
     def InitSnapshot(self,snapshotId):
@@ -47,13 +56,14 @@ class branch:
         #record in coming channel
         #Send Markers
         self.mutex.acquire()
-        self.sendMarker = True
+        self.incomingRecord[snapId] = True
+        self.sendMarker[snapId] = True
         self.mutex.release()
 
     def recordLocalState(self,snapId):
         self.mutex.acquire()
-        self.snapshots[snapId] = {"localState":self.balance}
-        print("Snapshot :{0}".format(self.snapshots))
+        self.snapshots[snapId] = {"localState":self.balance,"incoming":[]}
+        #print("Snapshot :{0}".format(self.snapshots))
         self.mutex.release()
 
     def sendMarkerMsg(self,snapId):
@@ -63,13 +73,22 @@ class branch:
 
     def marker(self,markerMsg):
         print("Received Marker !")
+        if markerMsg.snapshot_id not in self.snapshots:
+            self.mutex.acquire()
+            #record local state
+            self.snapshots[markerMsg.snapshot_id] = {"localState":self.balance, "incoming":[]}
+            #send markers
+            self.sendMarker[snapId] = True
+            #start recording of incoming
+            self.incomingRecord[markerMsg.snapshot_id] = True
+            self.mutex.release()
+            #print(self.snapshots)
+        elif  self.incomingRecord[markerMsg.snapshot_id]:
+            self.mutex.acquire()
+            self.incomingRecord[markerMsg.snapshot_id] = False
+            self.mutex.release()
+            print("****Snap {1} Captured*** : {0}".format(self.snapshots[markerMsg.snapshot_id],markerMsg.snapshot_id))
 
-        self.mutex.acquire()
-        #record local state
-        self.snapshots[markerMsg.snapshot_id] = {"localState":self.balance}
-        self.mutex.release()
-        print(self.snapshots)
-        #return 0
 
     def Server(self,sock):
         while True:
@@ -86,22 +105,37 @@ class branch:
                 self.InitSnapshot(msg.init_snapshot.snapshot_id)
             elif(msg.HasField("marker")):
                 self.marker(msg.marker)
+            elif(msg.HasField("retrieve_snapshot")):
+                ret = bank_pb2.BranchMessage()
+                ret.return_snapshot.local_snapshot.snapshot_id = msg.retrieve_snapshot.snapshot_id
+                self.mutex.acquire()
+                if msg.retrieve_snapshot.snapshot_id not in self.snapshots:
+                    self.snapshots[msg.retrieve_snapshot.snapshot_id] = {"localState":self.balance,"incoming":[]}
+                ret.return_snapshot.local_snapshot.balance = self.snapshots[msg.retrieve_snapshot.snapshot_id]["localState"]
+                # for x in self.snapshots[msg.retrieve_snapshot.snapshot_id]["incoming"]:
+                #     ch_state = ret.return_snapshot.local_snapshot.channel_state.add()
+                #     ch_state = x
+                ret.return_snapshot.local_snapshot.channel_state.extend(self.snapshots[msg.retrieve_snapshot.snapshot_id]["incoming"])
+                con.send(ret.SerializeToString())
+                self.mutex.release()
+
 
     #
     def initTransfer(self,sock):
         global snapId
         while True:
             #global br_list
-            if(self.sendMarker):
-                b = self.sendMarkerMsg(snapId)
-                for branch in self.branches_list:
-                    sock.connect((self.branches_list[branch]["ip"],self.branches_list[branch]["port"]))
-                    sock.send(b.SerializeToString())
-                    sock.close()
-                    sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-                self.mutex.acquire()
-                self.sendMarker = False
-                self.mutex.release()
+            for x in self.sendMarker:
+                if (self.sendMarker[x]):
+                    b = self.sendMarkerMsg(x)
+                    for branch in self.branches_list:
+                        sock.connect((self.branches_list[branch]["ip"],self.branches_list[branch]["port"]))
+                        sock.send(b.SerializeToString())
+                        sock.close()
+                        sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+                    self.mutex.acquire()
+                    self.sendMarker[x] = False
+                    self.mutex.release()
 
             print("inint Transfer")
             # for key in br_list:
@@ -111,8 +145,8 @@ class branch:
             sock.connect((self.branches_list[key]["ip"], self.branches_list[key]["port"]))
             msg = bank_pb2.BranchMessage()
             print("Transferring to - {0} on port: {1}".format(key, self.branches_list[key]["port"]))
-
-            msg.transfer.money = 10
+            amnt = random.randint(self.lower,self.upper)
+            msg.transfer.money = amnt
             self.mutex.acquire()
             print("Before Balance: {0} ".format(self.balance))
             self.balance -= msg.transfer.money
